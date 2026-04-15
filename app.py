@@ -15,6 +15,30 @@ def decode_image(file_storage):
     return img
 
 
+def apply_brightness_contrast(img, brightness, contrast):
+    lut = np.arange(256, dtype=np.float64) / 255.0
+
+    if brightness != 0:
+        gamma = pow(2, -brightness / 100.0)
+        lut = np.power(lut, gamma)
+
+    if contrast != 0:
+        c = contrast / 100.0
+        if c > 0:
+            p = 1.0 + c * 3.0
+            mask = lut < 0.5
+            lut = np.where(
+                mask,
+                0.5 * np.power(2.0 * lut, p),
+                1.0 - 0.5 * np.power(2.0 * (1.0 - lut), p),
+            )
+        else:
+            lut = lut * (1.0 + c) - 0.5 * c
+
+    lut = np.clip(lut * 255.0, 0, 255).astype(np.uint8)
+    return cv2.LUT(img, lut)
+
+
 def encode_image(img_bgr):
     success, buffer = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     if not success:
@@ -64,15 +88,19 @@ def compute_auto():
     try:
         if mode == 'exposure':
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            p_low = float(np.percentile(gray, 2))
-            p_high = float(np.percentile(gray, 98))
-            if p_high > p_low:
-                alpha = 255.0 / (p_high - p_low)
-                beta = -p_low * alpha
+
+            mean_val = np.clip(float(np.mean(gray)) / 255.0, 0.001, 0.999)
+            gamma = np.log(0.5) / np.log(mean_val)
+            brightness = int(np.clip(round(-100.0 * np.log2(gamma)), -100, 100))
+
+            p_low = float(np.percentile(gray, 2)) / 255.0
+            p_high = float(np.percentile(gray, 98)) / 255.0
+            spread = p_high - p_low
+            if spread > 0.01:
+                contrast = int(np.clip(round((0.85 / spread - 1.0) * 50), -100, 100))
             else:
-                alpha, beta = 1.0, 0.0
-            brightness = int(np.clip(round(beta), -100, 100))
-            contrast = int(np.clip(round((alpha - 1.0) * 100), -100, 100))
+                contrast = 0
+
             return jsonify({"params": {"brightness": brightness, "contrast": contrast}})
 
         elif mode == 'white_balance':
@@ -118,10 +146,8 @@ def process():
 
         result = img.copy()
 
-        alpha = 1.0 + contrast / 100.0
-        beta = brightness
-        if alpha != 1.0 or beta != 0.0:
-            result = cv2.convertScaleAbs(result, alpha=alpha, beta=beta)
+        if brightness != 0 or contrast != 0:
+            result = apply_brightness_contrast(result, brightness, contrast)
 
         if temperature != 0.0 or tint != 0.0:
             rf = result.astype(np.float32)
